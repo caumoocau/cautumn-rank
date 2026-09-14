@@ -75,23 +75,25 @@ body{
   h1{font-size:31px}
   .lead{font-size:15px;margin-top:6px}
   .field{margin-top:12px}
-  .btn{margin-top:14px;padding:14px;font-size:18px}
+  .btn{margin-top:10px;padding:13px;font-size:18px}
+  .field{margin-top:11px}
+  .consent{margin-top:10px}
 }
 h1{font-size:38px;font-weight:800;color:var(--maple-d);line-height:1.3;letter-spacing:-.5px;-webkit-text-stroke:1.1px currentColor;paint-order:stroke fill}
 .badge{display:inline-block;background:var(--maple);color:#fff8ee;font-size:14px;font-weight:700;
   border-radius:999px;padding:7px 18px;letter-spacing:.5px;margin-bottom:14px}
 .lead{font-size:16px;color:var(--ink2);line-height:1.75;margin-top:10px}
-.field{text-align:left;margin-top:18px}
+.field{text-align:left;margin-top:14px}
 .field-row{display:flex;gap:10px}
 .field-row .field{flex:1;min-width:0}
 .field label{display:block;font-size:14px;font-weight:700;color:var(--ink2);margin-bottom:6px}
 .field input{width:100%;padding:14px 16px;font-size:17px;font-family:inherit;color:var(--ink);
   border:2px solid #d8bfa4;border-radius:12px;background:#fff;outline:none;transition:border-color .15s}
 .field input:focus{border-color:var(--maple)}
-.consent{display:flex;align-items:flex-start;gap:9px;margin-top:16px;text-align:left;
+.consent{display:flex;align-items:flex-start;gap:9px;margin-top:13px;text-align:left;
   font-size:13px;color:var(--ink2);line-height:1.6;cursor:pointer}
 .consent input{width:19px;height:19px;margin-top:1px;accent-color:var(--maple);cursor:pointer;flex-shrink:0}
-.btn{margin-top:20px;width:100%;padding:17px;font-size:20px;font-weight:800;font-family:inherit;cursor:pointer;
+.btn{margin-top:13px;width:100%;padding:16px;font-size:20px;font-weight:800;font-family:inherit;cursor:pointer;
   background:var(--maple);color:#fff8ee;border:none;border-radius:14px;box-shadow:0 6px 0 var(--maple-d);
   transition:transform .1s,box-shadow .1s}
 .btn:active{transform:translateY(6px);box-shadow:0 0 0 var(--maple-d)}
@@ -100,7 +102,8 @@ h1{font-size:38px;font-weight:800;color:var(--maple-d);line-height:1.3;letter-sp
 .btn.ghost:active{transform:none}
 .link{margin-top:14px;background:none;border:none;font-family:inherit;font-size:14px;
   color:var(--ink2);text-decoration:underline;cursor:pointer}
-.err{margin-top:12px;font-size:14px;color:var(--maple);font-weight:700;min-height:20px}
+.err{margin-top:8px;font-size:14px;color:var(--maple);font-weight:700;min-height:0}
+.err:empty{display:none;margin:0}
 
 /* 게임 화면 */
 #s-play{cursor:pointer;padding:0}
