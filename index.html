@@ -102,6 +102,10 @@ h1{font-size:38px;font-weight:800;color:var(--maple-d);line-height:1.3;letter-sp
 .btn.ghost:active{transform:none}
 .link{margin-top:14px;background:none;border:none;font-family:inherit;font-size:14px;
   color:var(--ink2);text-decoration:underline;cursor:pointer}
+.netstat{margin-top:10px;font-size:12.5px;color:#8a7a66;letter-spacing:-.2px}
+.netstat.off{color:#b4552e;font-weight:700}
+.netstat.warn{color:#c07a1e;font-weight:700}
+#admin-tools{margin-top:6px}
 .err{margin-top:8px;font-size:14px;color:var(--maple);font-weight:700;min-height:0}
 .err:empty{display:none;margin:0}
 
@@ -179,6 +183,7 @@ tr.me{background:#fff5e2}
       </label>
       <p class="err" id="err"></p>
       <button class="btn" id="btn-start">도전 시작</button>
+      <p class="netstat" id="netstat"></p>
       <button class="btn ghost" id="btn-rank1">🍁 랭킹 보기 🍁</button>
     </div>
   </section>
@@ -212,6 +217,11 @@ tr.me{background:#fff5e2}
       <h1 style="font-size:30px">C:AUTUMN 순위</h1>
       <div class="board" id="board"><div class="empty">불러오는 중...</div></div>
       <button class="btn" id="btn-close">닫기</button>
+      <div id="admin-tools" style="display:none">
+        <button class="btn ghost" id="btn-offline">오프라인 모드 켜기</button>
+        <button class="btn ghost" id="btn-sync">밀린 기록 서버로 보내기</button>
+        <button class="btn ghost" id="btn-csv">기록 CSV로 내려받기</button>
+      </div>
       <button class="link" id="btn-admin">운영진 모드</button>
     </div>
   </section>
@@ -250,28 +260,60 @@ let phase='idle', swapAt=0, timer=null, myMs=null;
 function show(id){ ['s-start','s-play','s-result','s-rank'].forEach(s=>$(s).classList.toggle('show',s===id)); }
 
 /* ═══ 저장소 (Firebase REST) ═══ */
-const LKEY='cautumn_react_local';
-const localList=()=>{ try{ return JSON.parse(localStorage.getItem(LKEY))||[] }catch(e){ return [] } };
-const localSave=l=>{ try{ localStorage.setItem(LKEY,JSON.stringify(l.slice(0,500))) }catch(e){} };
+const LKEY='cautumn_react_local';   /* 이 기기에서 만든 기록(영구 보관) */
+const CKEY='cautumn_react_cache';   /* 서버 기록 캐시 */
+const OKEY='cautumn_react_offline'; /* 오프라인 모드 설정 */
+const NET_TIMEOUT=3500;
+
+let offlineMode=(()=>{ try{ return localStorage.getItem(OKEY)==='1' }catch(e){ return false } })();
+let syncing=false;
+
+const readJSON=k=>{ try{ return JSON.parse(localStorage.getItem(k))||[] }catch(e){ return [] } };
+const writeJSON=(k,v)=>{ try{ localStorage.setItem(k,JSON.stringify(v.slice(-800))) }catch(e){} };
+const localList=()=>readJSON(LKEY);
+const localSave=l=>writeJSON(LKEY,l);
+const cacheList=()=>readJSON(CKEY);
+const cacheSave=l=>writeJSON(CKEY,l);
 const norm=p=>String(p).replace(/[^0-9]/g,'');
+const pendingCount=()=>localList().filter(r=>!r.serverKey).length;
+
+function withTimeout(p,ms){
+  return Promise.race([p,new Promise((_,rej)=>setTimeout(()=>rej(new Error('timeout')),ms))]);
+}
+
+/* 서버 기록 + 이 기기 기록을 합침 (기기 기록은 절대 사라지지 않음) */
+function merged(serverList){
+  const byKey=new Map(serverList.map(r=>[r.key,r]));
+  localList().forEach(r=>{
+    const k=r.serverKey||r.key;
+    const srv=byKey.get(k);
+    if(srv) byKey.set(k,Object.assign({},srv,{phoneFull:r.phoneFull,sidFull:r.sidFull}));
+    else byKey.set(k,Object.assign({},r,{key:k}));
+  });
+  return [...byKey.values()];
+}
 
 async function fetchScores(){
+  if(offlineMode) return {list:merged(cacheList()),online:false,off:true};
   try{
-    const r=await fetch(DB+'/scores.json',{cache:'no-store'});
+    const r=await withTimeout(fetch(DB+'/scores.json',{cache:'no-store'}),NET_TIMEOUT);
     if(!r.ok) throw 0;
     const d=await r.json()||{};
-    const list=Object.entries(d).map(([k,v])=>Object.assign({key:k},v));
-    localSave(list);
-    return {list,online:true};
-  }catch(e){ return {list:localList(),online:false}; }
+    const srv=Object.entries(d).map(([k,v])=>Object.assign({key:k},v));
+    cacheSave(srv);
+    syncPending();
+    return {list:merged(srv),online:true};
+  }catch(e){ return {list:merged(cacheList()),online:false}; }
 }
 async function fetchPhones(){
+  if(offlineMode) return null;
   try{
-    const r=await fetch(DB+'/contacts.json',{cache:'no-store'});
+    const r=await withTimeout(fetch(DB+'/contacts.json',{cache:'no-store'}),NET_TIMEOUT);
     if(!r.ok) return null;
     return await r.json()||{};
   }catch(e){ return null; }
 }
+
 /* 같은 이름+번호는 최고 기록만 남김 */
 function best(list){
   const m=new Map();
@@ -283,28 +325,70 @@ function best(list){
   return [...m.values()].sort((a,b)=>(a.ms-b.ms)||(a.at-b.at));
 }
 
+/* 기록 저장: 항상 기기에 먼저 남기고, 가능하면 서버로 전송 */
 async function submit(ms){
   const now=new Date(), p=v=>String(v).padStart(2,'0');
-  const digits=norm(me.phone);
-  const rec={name:me.name, dept:me.dept, ms, pid:digits.slice(-4),
-    time:p(now.getHours())+':'+p(now.getMinutes()), at:Date.now()};
+  const rec={name:me.name, dept:me.dept, ms, pid:norm(me.phone).slice(-4),
+    time:p(now.getHours())+':'+p(now.getMinutes()), at:Date.now(),
+    sidFull:me.sid, phoneFull:me.phone,
+    key:'L'+Date.now()+'-'+Math.floor(Math.random()*1e4)};
+  const mine=localList(); mine.push(rec); localSave(mine);
+  myId=rec.key;
+  updateNet();
+  if(offlineMode) return false;
+  const ok=await push(rec);
+  updateNet();
+  return ok;
+}
+async function push(rec){
   try{
-    const r=await fetch(DB+'/scores.json',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(rec)});
-    const j=await r.json(); myId=j&&j.name||null;
-    if(myId) fetch(DB+'/contacts/'+myId+'.json',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:me.name,dept:me.dept,sid:me.sid,phone:me.phone,at:rec.at})}).catch(()=>{});
+    const body={name:rec.name,dept:rec.dept,ms:rec.ms,pid:rec.pid,time:rec.time,at:rec.at};
+    const r=await withTimeout(fetch(DB+'/scores.json',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}),NET_TIMEOUT);
+    const j=await r.json(); const sk=j&&j.name;
+    if(!sk) throw 0;
+    withTimeout(fetch(DB+'/contacts/'+sk+'.json',{method:'PUT',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({name:rec.name,dept:rec.dept,sid:rec.sidFull,phone:rec.phoneFull,at:rec.at})}),NET_TIMEOUT).catch(()=>{});
+    const l=localList(); const t=l.find(x=>x.key===rec.key);
+    if(t){ t.serverKey=sk; localSave(l); }
+    if(myId===rec.key) myId=sk;
     return true;
-  }catch(e){
-    myId='local-'+rec.at; rec.key=myId; rec.phoneFull=me.phone; rec.sidFull=me.sid;
-    const l=localList(); l.push(rec); localSave(l);
-    return false;
+  }catch(e){ return false; }
+}
+/* 밀린 기록 자동 전송 */
+async function syncPending(){
+  if(offlineMode||syncing) return 0;
+  const wait=localList().filter(r=>!r.serverKey);
+  if(!wait.length) return 0;
+  syncing=true; let n=0;
+  for(const r of wait){ if(await push(r)) n++; else break; }
+  syncing=false; updateNet();
+  return n;
+}
+window.addEventListener('online',()=>{ syncPending(); updateNet(); });
+window.addEventListener('offline',updateNet);
+
+/* 연결 상태 표시 */
+function updateNet(){
+  const el=$('netstat'); if(!el) return;
+  const pend=pendingCount();
+  if(offlineMode){
+    el.innerHTML='🔌 오프라인 모드 · 이 기기에 '+localList().length+'건 저장됨';
+    el.className='netstat off';
+  } else if(!navigator.onLine){
+    el.innerHTML='📴 인터넷 끊김 · 기기에 저장 중'+(pend?' (미전송 '+pend+'건)':'');
+    el.className='netstat off';
+  } else {
+    el.innerHTML= pend? '🔄 미전송 '+pend+'건 · 연결되면 자동 전송' : '🌐 온라인 · 랭킹 공유 중';
+    el.className='netstat'+(pend?' warn':'');
   }
 }
 
 async function renderBoard(){
   const box=$('board');
   box.innerHTML='<div class="empty">불러오는 중...</div>';
-  const {list,online}=await fetchScores();
+  const {list,online,off}=await fetchScores();
   const rows=best(list);
+  updateNet();
   if(!rows.length){ box.innerHTML='<div class="empty">아직 기록이 없어요.<br>첫 주자가 되어보세요! 🍁</div>'; return; }
   let phones=null;
   if(admin) phones=await fetchPhones();
@@ -314,10 +398,10 @@ async function renderBoard(){
     let ph='';
     if(admin){
       const c = phones&&phones[r.key];
-      const full = c&&c.phone;
+      const full = (c&&c.phone) || r.phoneFull || ('****-'+(r.pid||'????'));
       const sid = (c&&c.sid) || r.sidFull || '';
       ph='<td class="t-phone">'+esc(sid||'—')+'</td>'
-        +'<td class="t-phone">'+esc(full|| (r.phoneFull||('****-'+(r.pid||'????'))))+'</td>';
+        +'<td class="t-phone">'+esc(full)+'</td>';
     }
     return '<tr class="'+(i<3?'top3':'')+(r.key&&r.key===myId?' me':'')+'">'
       +'<td class="t-rank">'+medal(i)+'</td>'
@@ -326,8 +410,29 @@ async function renderBoard(){
       +'<td class="t-time">'+(r.ms/1000).toFixed(3)+'초</td>'
       +'<td class="t-when">'+esc(r.time||'')+'</td></tr>';
   }).join('');
-  box.innerHTML=(online?'':'<div class="offline">오프라인 · 이 노트북 기록만 표시됩니다</div>')
-    +'<table>'+head+body+'</table>';
+  const banner = off ? '<div class="offline">🔌 오프라인 모드 · 이 기기 기록만 표시됩니다</div>'
+              : online ? '' : '<div class="offline">📴 연결 안 됨 · 이 기기 기록만 표시됩니다</div>';
+  box.innerHTML=banner+'<table>'+head+body+'</table>';
+}
+
+/* 기록 내려받기 (CSV) */
+function exportCSV(){
+  const rows=best(merged(cacheList()));
+  const head=['순위','이름','학과','학번','연락처','기록(초)','시각','전송상태'];
+  const lines=[head.join(',')];
+  const q=v=>'"'+String(v==null?'':v).replace(/"/g,'""')+'"';
+  const localByKey=new Map(localList().map(r=>[r.serverKey||r.key,r]));
+  rows.forEach((r,i)=>{
+    const L=localByKey.get(r.key)||{};
+    lines.push([i+1,r.name,r.dept||'',L.sidFull||r.sidFull||'',L.phoneFull||r.phoneFull||'',
+      (r.ms/1000).toFixed(3),r.time||'',(L.key&&!L.serverKey)?'미전송':'전송됨'].map(q).join(','));
+  });
+  const blob=new Blob(['﻿'+lines.join('\n')],{type:'text/csv;charset=utf-8'});
+  const a=document.createElement('a');
+  const d=new Date(), p=v=>String(v).padStart(2,'0');
+  a.href=URL.createObjectURL(blob);
+  a.download='cautumn_기록_'+d.getFullYear()+p(d.getMonth()+1)+p(d.getDate())+'_'+p(d.getHours())+p(d.getMinutes())+'.csv';
+  a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),2000);
 }
 
 /* ═══ 게임 ═══ */
@@ -388,8 +493,8 @@ async function finish(ms){
   $('res-desc').textContent=desc;
   $('res-best').innerHTML='';
   show('s-result');
-  const {list}=await fetchScores();
-  const prev=best(list).find(r=>r.name===me.name&&r.pid===norm(me.phone).slice(-4));
+  const prevList=best(merged(cacheList()));
+  const prev=prevList.find(r=>r.name===me.name&&r.pid===norm(me.phone).slice(-4));
   await submit(ms);
   if(prev && ms<prev.ms) $('res-best').innerHTML='<span class="newbest">🎉 개인 최고기록 경신! (이전 '+(prev.ms/1000).toFixed(3)+'초)</span>';
   else if(prev) $('res-best').innerHTML='<span class="newbest" style="background:#e6d3ba;color:#6b4a33">이전 최고기록 '+(prev.ms/1000).toFixed(3)+'초 유지</span>';
@@ -426,15 +531,37 @@ function openRank(from){ prevScreen=from; show('s-rank'); renderBoard(); }
 $('btn-rank1').addEventListener('click',()=>openRank('s-start'));
 $('btn-rank2').addEventListener('click',()=>openRank('s-result'));
 $('btn-close').addEventListener('click',()=>{ admin=false; show(prevScreen); });
+function paintAdminTools(){
+  $('admin-tools').style.display= admin? 'block':'none';
+  $('btn-offline').textContent= offlineMode? '오프라인 모드 끄기':'오프라인 모드 켜기';
+}
 $('btn-admin').addEventListener('click',async()=>{
-  if(admin){ admin=false; renderBoard(); return; }
+  if(admin){ admin=false; paintAdminTools(); renderBoard(); return; }
   const pw=prompt('운영진 비밀번호를 입력하세요');
   if(pw===null) return;
   if(pw!==ADMIN_PW){ alert('비밀번호가 올바르지 않습니다.'); return; }
   admin=true;
+  paintAdminTools();
   await renderBoard();
-  alert('운영진 모드: 연락처가 표시됩니다.\n한 번 더 누르면 숨겨집니다.\n\n※ 연락처가 "****-1234"로만 보이면 Firebase 규칙에서 contacts 읽기가 차단된 상태입니다.\n   전체 번호는 Firebase 콘솔에서 확인하세요.');
 });
+$('btn-offline').addEventListener('click',async()=>{
+  offlineMode=!offlineMode;
+  try{ localStorage.setItem(OKEY, offlineMode?'1':'0'); }catch(e){}
+  paintAdminTools(); updateNet();
+  if(!offlineMode){ const n=await syncPending(); if(n) alert('밀린 기록 '+n+'건을 서버로 보냈습니다.'); }
+  else alert('오프라인 모드입니다.\n인터넷을 쓰지 않고 이 기기에만 기록합니다.\n행사 후 이 버튼을 다시 눌러 끄면 밀린 기록이 서버로 전송됩니다.');
+  renderBoard();
+});
+$('btn-sync').addEventListener('click',async()=>{
+  if(offlineMode){ alert('오프라인 모드가 켜져 있습니다. 먼저 꺼주세요.'); return; }
+  const b=$('btn-sync'); b.disabled=true; b.textContent='보내는 중...';
+  const n=await syncPending();
+  b.disabled=false; b.textContent='밀린 기록 서버로 보내기';
+  alert(n? n+'건을 서버로 보냈습니다.' : (pendingCount()? '전송에 실패했습니다. 인터넷 연결을 확인해 주세요.':'모든 기록이 이미 전송되었습니다.'));
+  renderBoard();
+});
+$('btn-csv').addEventListener('click',exportCSV);
+updateNet(); paintAdminTools(); syncPending();
 $('in-name').focus();
 </script>
 </body>
